@@ -14,7 +14,7 @@ var mysqlBaselineQuotaTriggers = []string{
 
 // Retired by operator decision 501, hk 6389: new installs no longer create
 // bench_scores or bench_area_exceptions; existing databases keep the empty
-// tables until release 2 (hk 6390) drops them.
+// tables until 20261127-retire-bench-tables (hk 6390) drops them.
 var mysqlBaseline = mysqlMigration{id: "20261117-quota-bench-baseline", steps: append([]string{
 	`CREATE TABLE IF NOT EXISTS quota_observations (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, account_key VARCHAR(64) NOT NULL, kind VARCHAR(16) NOT NULL CHECK (kind IN ('auto','manual')), window_key VARCHAR(16) NOT NULL, measured_at DATETIME(6) NOT NULL, value JSON NOT NULL, received_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin`,
 	`CREATE TABLE IF NOT EXISTS quota_latest (account_key VARCHAR(64) NOT NULL, kind VARCHAR(16) NOT NULL, window_key VARCHAR(16) NOT NULL, observation_id BIGINT NOT NULL, measured_at DATETIME(6) NOT NULL, confirmed_at DATETIME(6), PRIMARY KEY(account_key,kind,window_key), FOREIGN KEY(observation_id) REFERENCES quota_observations(id)) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin`,

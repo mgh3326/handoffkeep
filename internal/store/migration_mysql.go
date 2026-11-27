@@ -204,6 +204,13 @@ func mysqlIfConstraint(table, name, stmt string) string {
 	return strings.Join([]string{"", "has_constraint", table, name, stmt}, mysqlGuardSep)
 }
 
+// mysqlRequireEmpty is a refusal, not a conditional: the step fails with the
+// table's name and row count while the table holds any row, and passes when it
+// is empty or absent (requireMySQLEmpty). It has no statement of its own.
+func mysqlRequireEmpty(table string) string {
+	return strings.Join([]string{"", "require_empty", table, table, ""}, mysqlGuardSep)
+}
+
 func parseMySQLGuard(step string) (kind, table, object, stmt string, ok bool) {
 	if !strings.HasPrefix(step, mysqlGuardSep) {
 		return "", "", "", step, false
@@ -220,6 +227,9 @@ func execMySQLStep(ctx context.Context, conn *sql.Conn, step string) error {
 	if !guarded {
 		_, err := conn.ExecContext(ctx, stmt)
 		return err
+	}
+	if kind == "require_empty" {
+		return requireMySQLEmpty(ctx, conn, table)
 	}
 	var query string
 	switch kind {
@@ -243,6 +253,24 @@ func execMySQLStep(ctx context.Context, conn *sql.Conn, step string) error {
 	}
 	_, err := conn.ExecContext(ctx, stmt)
 	return err
+}
+
+// requireMySQLEmpty fails, naming table and its row count, while table holds a
+// row. A table that does not exist passes. The table name is a code constant,
+// so the count query interpolates it.
+func requireMySQLEmpty(ctx context.Context, conn *sql.Conn, table string) error {
+	var exists bool
+	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?)`, table).Scan(&exists); err != nil || !exists {
+		return err
+	}
+	var rows int64
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&rows); err != nil {
+		return err
+	}
+	if rows > 0 {
+		return fmt.Errorf("%s holds %d rows; it is dropped only when empty", table, rows)
+	}
+	return nil
 }
 
 // shouldRunMySQLGuard interprets the catalog predicate for a guarded step.

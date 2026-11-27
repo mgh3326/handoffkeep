@@ -1221,7 +1221,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 9, func() error {
 		// Retired by operator decision 501, hk 6389: new installs no longer
 		// create bench_scores; existing databases keep the empty table until
-		// release 2 (hk 6390) drops it.
+		// 20261127-retire-bench-tables (hk 6390) drops it.
 		v9 := []string{
 			`CREATE TABLE IF NOT EXISTS bench_reps (id BIGSERIAL PRIMARY KEY, origin_id BIGINT NOT NULL CHECK(origin_id >= 1), profile TEXT NOT NULL, model_id TEXT, task_ref TEXT, tier TEXT, role TEXT, rounds INTEGER, blockers_found INTEGER, completed INTEGER, input_tokens BIGINT, output_tokens BIGINT, notes TEXT, recorded_at TIMESTAMPTZ NOT NULL, effort TEXT, grade TEXT, table_grade TEXT, created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, UNIQUE(created_by, origin_id))`,
 			`CREATE INDEX IF NOT EXISTS bench_reps_profile_id ON bench_reps(profile, id DESC)`,
@@ -1400,8 +1400,8 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := migrateOnce(ctx, tx, 19, func() error {
 		// Retired by operator decision 501, hk 6389: new installs no longer
 		// create bench_area_exceptions; existing databases keep the empty
-		// table until release 2 (hk 6390) drops it. The version marker stays
-		// so the integer versions remain frozen.
+		// table until 20261127-retire-bench-tables (hk 6390) drops it. The
+		// version marker stays so the integer versions remain frozen.
 		v19 := []string{
 			`INSERT INTO schema_version(version) VALUES (19)`,
 		}
