@@ -367,6 +367,108 @@ func TestChangeChecksCompleteMarksGone(t *testing.T) {
 	}
 }
 
+// checkChunkedPollFreshness is the hk 7050 scenario both store dialects run:
+// the later chunks of an older chunked poll must still land the checks a
+// newer partial write did not name, while every named check keeps its own
+// freshness and the watermark never moves back.
+func checkChunkedPollFreshness(t *testing.T, f stateFixture) {
+	t.Helper()
+	batch := func(min int, src string, complete bool, delivery string, cs ...ChangeCheckIn) ChangeBatch {
+		return ChangeBatch{Checks: &ChangeChecksWrite{HeadSHA: testSHA1, Checks: cs, ObservedAt: f.at(min), Source: src, Complete: complete, DeliveryID: delivery}}
+	}
+	ck := func(name, state string) ChangeCheckIn { return ChangeCheckIn{Name: name, State: state} }
+	byName := func() map[string]ChangeCheck {
+		out := map[string]ChangeCheck{}
+		for _, c := range *f.view(t, ChangeReadOptions{}).Checks {
+			out[c.Name] = c
+		}
+		return out
+	}
+	freshness := func() SectionFreshness {
+		t.Helper()
+		fv := f.view(t, ChangeReadOptions{}).Freshness.Checks
+		if fv == nil {
+			t.Fatal("checks freshness is nil")
+		}
+		return *fv
+	}
+	// chunk 1 of an older poll applies.
+	if r := f.apply(t, batch(10, "poll", false, "", ck("build", "queued"), ck("test", "queued"))); !r.Sections["checks"].Applied {
+		t.Fatalf("chunk 1: %+v", r.Sections["checks"])
+	}
+	// A newer partial webhook write for build applies.
+	if r := f.apply(t, batch(20, "webhook", false, "wh-1", ChangeCheckIn{Name: "build", State: "completed", Conclusion: "success"})); !r.Sections["checks"].Applied {
+		t.Fatalf("webhook write: %+v", r.Sections["checks"])
+	}
+	// chunk 2 of the older poll applies instead of going stale whole.
+	if r := f.apply(t, batch(10, "poll", false, "", ck("lint", "queued"), ck("docs", "queued"))); !r.Sections["checks"].Applied {
+		t.Fatalf("chunk 2 went stale: %+v", r.Sections["checks"])
+	}
+	got := byName()
+	if c := got["build"]; c.State != "completed" || !c.ObservedAt.Equal(f.at(20)) || c.DeliveryID == nil || *c.DeliveryID != "wh-1" {
+		t.Fatalf("the newer check was not kept: %+v", c)
+	}
+	for _, name := range []string{"lint", "docs"} {
+		if c := got[name]; c.State != "queued" || !c.ObservedAt.Equal(f.at(10)) {
+			t.Fatalf("chunk 2 check %s: %+v", name, c)
+		}
+	}
+	if fv := freshness(); !fv.ObservedAt.Equal(f.at(20)) || fv.Source == nil || *fv.Source != "webhook" {
+		t.Fatalf("the watermark moved back: %+v", fv)
+	}
+	// An older write naming a newer check and a check hk lacks applies to the
+	// row it may and skips the newer one.
+	if r := f.apply(t, batch(10, "poll", false, "", ck("build", "in_progress"), ck("extra", "queued"))); !r.Sections["checks"].Applied {
+		t.Fatalf("mixed older write went stale: %+v", r.Sections["checks"])
+	}
+	got = byName()
+	if c := got["build"]; c.State != "completed" || !c.ObservedAt.Equal(f.at(20)) || c.DeliveryID == nil || *c.DeliveryID != "wh-1" {
+		t.Fatalf("an older write overwrote a newer check: %+v", c)
+	}
+	if c := got["extra"]; c.State != "queued" || !c.ObservedAt.Equal(f.at(10)) || c.DeliveryID != nil {
+		t.Fatalf("the fresh check did not land: %+v", c)
+	}
+	// An older write naming only the newer check answers stale.
+	if r := f.apply(t, batch(10, "poll", false, "", ck("build", "failed"))); !r.Sections["checks"].Applied || r.Sections["checks"].Reason != staleReason {
+		t.Fatalf("an older write naming only a newer check: %+v", r.Sections["checks"])
+	}
+	if c := byName()["build"]; c.State != "completed" {
+		t.Fatalf("a stale write changed a check: %+v", c)
+	}
+	// An older complete set marks gone only the rows it may: the newer check
+	// is neither overwritten nor marked gone.
+	if r := f.apply(t, batch(15, "poll", true, "", ck("test", "completed"), ck("lint", "completed"))); !r.Sections["checks"].Applied {
+		t.Fatalf("older complete write went stale: %+v", r.Sections["checks"])
+	}
+	got = byName()
+	if _, ok := got["build"]; !ok {
+		t.Fatal("an older complete set marked the newer check gone")
+	}
+	for _, name := range []string{"docs", "extra"} {
+		if _, ok := got[name]; ok {
+			t.Fatalf("an unnamed older check %s stayed", name)
+		}
+	}
+	if c := got["test"]; c.State != "completed" || !c.ObservedAt.Equal(f.at(15)) {
+		t.Fatalf("named check test: %+v", c)
+	}
+	if fv := freshness(); !fv.ObservedAt.Equal(f.at(20)) || fv.Source == nil || *fv.Source != "webhook" {
+		t.Fatalf("the watermark moved back: %+v", fv)
+	}
+	// An equal-observed_at write still applies and, being unchanged, keeps the
+	// stored delivery.
+	if r := f.apply(t, batch(20, "webhook", false, "", ChangeCheckIn{Name: "build", State: "completed", Conclusion: "success"})); !r.Sections["checks"].Applied {
+		t.Fatalf("equal write went stale: %+v", r.Sections["checks"])
+	}
+	if c := byName()["build"]; c.DeliveryID == nil || *c.DeliveryID != "wh-1" {
+		t.Fatalf("an unchanged check in a write without delivery_id lost its delivery: %+v", c)
+	}
+}
+
+func TestChangeChecksChunkedPollFreshness(t *testing.T) {
+	checkChunkedPollFreshness(t, newStateFixture(t, "chunkfresh"))
+}
+
 func TestChangeThreadsCompleteMarksGone(t *testing.T) {
 	f := newStateFixture(t, "threadgone")
 	th := func(id string) ChangeThreadIn { return ChangeThreadIn{ThreadID: id, AuthorKind: "bot"} }

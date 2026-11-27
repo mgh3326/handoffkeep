@@ -103,13 +103,51 @@ func markGoneMySQL(ctx context.Context, tx transaction, table string, changeID i
 	return err
 }
 
+// applyChangeChecksMySQL mirrors applyChecksTx: per-check freshness (hk 7050)
+// — a stored row is replaced only when its observed_at is not newer than the
+// write's, the write is stale only when it is older than the checks watermark
+// and every check it names already has a newer row, checks_observed_at is the
+// max of the stored value and the write's observed_at, and a complete write
+// marks gone only rows not newer than the write. The changes row lock keeps
+// the newer set stable for the transaction, so the upsert itself needs no
+// freshness clause (ON DUPLICATE KEY UPDATE has no WHERE).
 func applyChangeChecksMySQL(ctx context.Context, tx transaction, c changeLock, w ChangeChecksWrite) (ChangeSectionResult, error) {
-	if olderThan(c.checksObserved, w.ObservedAt) {
-		return staleResult, nil
-	}
 	names := make([]string, 0, len(w.Checks))
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
+	}
+	newer := map[string]bool{}
+	if len(names) > 0 {
+		args := make([]any, 0, len(names)+3)
+		args = append(args, c.id, w.HeadSHA, w.ObservedAt)
+		for _, n := range names {
+			args = append(args, n)
+		}
+		rows, err := tx.Query(ctx, `SELECT name FROM change_checks WHERE change_id=? AND head_sha=? AND observed_at>? AND name IN (`+placeholders(len(names))+`)`, args...)
+		if err != nil {
+			return ChangeSectionResult{}, err
+		}
+		for rows.Next() {
+			var n string
+			if err := rows.Scan(&n); err != nil {
+				rows.Close()
+				return ChangeSectionResult{}, err
+			}
+			newer[n] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return ChangeSectionResult{}, err
+		}
+		rows.Close()
+	}
+	if olderThan(c.checksObserved, w.ObservedAt) && len(newer) == len(names) {
+		return staleResult, nil
+	}
+	for _, k := range w.Checks {
+		if newer[k.Name] {
+			continue
+		}
 		_, err := tx.Exec(ctx, `INSERT INTO change_checks(change_id,head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source,gone,delivery_id)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,FALSE,?) ON DUPLICATE KEY UPDATE
 	delivery_id=IF(NOT (state <=> VALUES(state) AND conclusion <=> VALUES(conclusion) AND url <=> VALUES(url) AND required <=> VALUES(required) AND started_at <=> VALUES(started_at) AND completed_at <=> VALUES(completed_at) AND observed_at <=> VALUES(observed_at) AND source <=> VALUES(source) AND gone <=> FALSE) OR (VALUES(delivery_id) IS NOT NULL AND NOT (delivery_id <=> VALUES(delivery_id))),VALUES(delivery_id),delivery_id),
@@ -119,12 +157,21 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,FALSE,?) ON DUPLICATE KEY UPDATE
 		}
 	}
 	if w.Complete {
-		if err := markGoneMySQL(ctx, tx, "change_checks", c.id, w.ObservedAt, w.Source, "name", names, w.HeadSHA); err != nil {
+		query := `UPDATE change_checks SET gone=TRUE,observed_at=?,source=? WHERE change_id=? AND head_sha=? AND NOT gone AND observed_at<=? AND name NOT IN (` + placeholders(len(names)) + `)`
+		args := []any{w.ObservedAt, w.Source, c.id, w.HeadSHA, w.ObservedAt}
+		for _, n := range names {
+			args = append(args, n)
+		}
+		if _, err := tx.Exec(ctx, query, args...); err != nil {
 			return ChangeSectionResult{}, err
 		}
 	}
-	err := updateChangeMySQL(ctx, tx, c.id, nil, setCol{"checks_observed_at", "", w.ObservedAt}, setCol{"checks_source", "", w.Source})
-	return ChangeSectionResult{Applied: true}, err
+	if c.checksObserved == nil || w.ObservedAt.After(*c.checksObserved) {
+		if err := updateChangeMySQL(ctx, tx, c.id, nil, setCol{"checks_observed_at", "", w.ObservedAt}, setCol{"checks_source", "", w.Source}); err != nil {
+			return ChangeSectionResult{}, err
+		}
+	}
+	return ChangeSectionResult{Applied: true}, nil
 }
 
 func applyChangeThreadsMySQL(ctx context.Context, tx transaction, c changeLock, w ChangeThreadsWrite) (ChangeSectionResult, error) {
