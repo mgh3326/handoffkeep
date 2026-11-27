@@ -103,8 +103,12 @@ type ChangeCheckIn struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
-// ChangeChecksWrite is the checks of one head. Complete says it is the full
-// set for that head: a stored check it does not name is marked gone.
+// ChangeChecksWrite is the checks of one head. Complete says the write is
+// the whole set for that head: a stored check it does not name is marked
+// gone, but only rows whose stored observed_at is not newer than the write's,
+// so a newer write's check is never marked gone by an older complete set. A
+// chunked set must send complete=false — a set too large for one write is
+// sent in chunks and is not gone-marked.
 type ChangeChecksWrite struct {
 	HeadSHA    string          `json:"head_sha"`
 	Checks     []ChangeCheckIn `json:"checks"`
@@ -677,18 +681,55 @@ func applyStateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeStateWri
 	return ChangeSectionResult{Applied: true, Redacted: redacted}, err
 }
 
-// applyChecksTx upserts the checks. A row whose values are unchanged is not
-// rewritten, except that a write carrying a delivery_id stores it when it
+// applyChecksTx upserts the checks with per-check freshness (hk 7050): a
+// stored row is replaced only when its observed_at is not newer than the
+// write's, so the later chunks of an older chunked poll still land the checks
+// a newer partial write did not name. The write answers stale only when it is
+// older than the checks watermark and every check it names already has a
+// newer row — an empty write is stale exactly when it is older than the
+// watermark, as before. checks_observed_at becomes the max of the stored
+// value and the write's observed_at and never moves back; checks_source
+// follows the write that last moved it. A row whose values are unchanged is
+// not rewritten, except that a write carrying a delivery_id stores it when it
 // differs: the write "wrote" the row, so the read reports that delivery. An
 // unchanged row in a write without a delivery_id is left alone.
 func applyChecksTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeChecksWrite) (ChangeSectionResult, error) {
-	if olderThan(c.checksObserved, w.ObservedAt) {
-		return staleResult, nil
-	}
-	b := &statementBatch{}
 	names := make([]string, 0, len(w.Checks))
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
+	}
+	// newer holds the named checks whose stored row for this head is newer
+	// than the write; the changes row lock keeps the set stable for the
+	// transaction.
+	newer := map[string]bool{}
+	if len(names) > 0 {
+		rows, err := tx.Query(ctx, `SELECT name FROM change_checks WHERE change_id=$1 AND head_sha=$2 AND observed_at>$3 AND name=ANY($4::text[])`,
+			c.id, w.HeadSHA, w.ObservedAt, names)
+		if err != nil {
+			return ChangeSectionResult{}, err
+		}
+		for rows.Next() {
+			var n string
+			if err := rows.Scan(&n); err != nil {
+				rows.Close()
+				return ChangeSectionResult{}, err
+			}
+			newer[n] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return ChangeSectionResult{}, err
+		}
+		rows.Close()
+	}
+	if olderThan(c.checksObserved, w.ObservedAt) && len(newer) == len(names) {
+		return staleResult, nil
+	}
+	b := &statementBatch{}
+	for _, k := range w.Checks {
+		if newer[k.Name] {
+			continue
+		}
 		b.Queue(`INSERT INTO change_checks(change_id,head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source,gone,delivery_id)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false,$12)
 ON CONFLICT(change_id,head_sha,name) DO UPDATE SET state=EXCLUDED.state,conclusion=EXCLUDED.conclusion,url=EXCLUDED.url,required=EXCLUDED.required,
@@ -700,14 +741,21 @@ WHERE (change_checks.state,change_checks.conclusion,change_checks.url,change_che
 			c.id, w.HeadSHA, k.Name, k.State, nullStr(k.Conclusion), nullStr(k.URL), k.Required, k.StartedAt, k.CompletedAt, w.ObservedAt, w.Source, nullStr(w.DeliveryID))
 	}
 	if w.Complete {
-		b.Queue(`UPDATE change_checks SET gone=true,observed_at=$3,source=$4 WHERE change_id=$1 AND head_sha=$2 AND NOT gone AND name <> ALL($5::text[])`,
+		// Rows already gone also take the write's observed_at when it is newer:
+		// the complete set still excludes them, and the advance keeps a later
+		// write older than this one from reviving them.
+		b.Queue(`UPDATE change_checks SET gone=true,observed_at=$3,source=$4 WHERE change_id=$1 AND head_sha=$2 AND observed_at<=$3 AND name <> ALL($5::text[]) AND (NOT gone OR observed_at<$3)`,
 			c.id, w.HeadSHA, w.ObservedAt, w.Source, names)
 	}
 	if err := execBatch(ctx, tx, b); err != nil {
 		return ChangeSectionResult{}, err
 	}
-	err := updateChangeCols(ctx, tx, c.id, nil, setCol{"checks_observed_at", "timestamptz", w.ObservedAt}, setCol{"checks_source", "text", w.Source})
-	return ChangeSectionResult{Applied: true}, err
+	if c.checksObserved == nil || w.ObservedAt.After(*c.checksObserved) {
+		if err := updateChangeCols(ctx, tx, c.id, nil, setCol{"checks_observed_at", "timestamptz", w.ObservedAt}, setCol{"checks_source", "text", w.Source}); err != nil {
+			return ChangeSectionResult{}, err
+		}
+	}
+	return ChangeSectionResult{Applied: true}, nil
 }
 
 func applyThreadsTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeThreadsWrite) (ChangeSectionResult, error) {
