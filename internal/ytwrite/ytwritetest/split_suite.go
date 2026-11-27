@@ -933,11 +933,17 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		e.drive() // the send runs under the default window (hk 6224)
 		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
 		// The 30ms window is set for the recovery whose stopped step it times.
-		// The lease is 430ms + 2 × 540ms, so the work deadline is 1310ms in and
-		// the lease ends at 1510ms: the mark's wait lands between them.
+		// The lease is 430ms + 2 × 540ms = 1510ms. The recovery's send context
+		// is bounded by the 30ms dispatch window, so once the mark returns
+		// after more than 30ms that context is done and the step is stopped
+		// (time.Sleep never returns early, so the lower bound holds on any
+		// runner). The settlement runs on the lease context, which is still
+		// live while the mark's wait stays well under the 1510ms lease end:
+		// the 100ms wait leaves 1.4s of overshoot before the lease ends,
+		// instead of the 110ms a 1400ms wait left.
 		e.dispatch = 30 * time.Millisecond
 		hook := &markHook{splitLedger: ctxSettleLedger{splitLedger: e.ledger.(splitLedger)}, step: 0,
-			after: func() { time.Sleep(1400 * time.Millisecond) }}
+			after: func() { time.Sleep(100 * time.Millisecond) }}
 		e.restart(hook)
 		e.clock.Advance(time.Hour)
 		e.drive()
