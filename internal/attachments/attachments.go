@@ -19,6 +19,7 @@ import (
 
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/telemetry"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -578,7 +579,9 @@ func (m *Manager) putBytes(ctx context.Context, client, name, mime, ref string, 
 	if e != nil {
 		return store.Attachment{}, false, e
 	}
+	_, endHash := telemetry.Span(ctx, "attachment.hash")
 	sum := sha256.Sum256(body)
+	endHash(int64(len(body)), false)
 	sha := hex.EncodeToString(sum[:])
 	k := key(sha)
 	return m.putVerified(ctx, client, name, mime, ref, sha, int64(len(body)), "", false, nil, func(ctx context.Context) error {
@@ -610,7 +613,17 @@ func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha 
 			return m.Store.PutAttachment(ctx, x, m.Config.StorageCap, m.Config.PutCap)
 		}
 	}
-	if old, ok, e := m.Store.GetAttachment(ctx, sha); e != nil {
+	// The metadata write is one db_write span however the caller commits it.
+	commitSpanned := func(x store.Attachment) (store.Attachment, bool, error) {
+		_, endCommit := telemetry.Span(ctx, "attachment.db_write")
+		y, created, e := commit(x)
+		endCommit(size, e != nil)
+		return y, created, e
+	}
+	lookupCtx, endLookup := telemetry.Span(ctx, "attachment.db_read")
+	old, ok, e := m.Store.GetAttachment(lookupCtx, sha)
+	endLookup(size, e != nil)
+	if e != nil {
 		return old, false, e
 	} else if ok {
 		// An archived blob takes no new ref. Refuse here as well as in the
@@ -620,22 +633,28 @@ func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha 
 			return old, false, store.ErrAttachmentArchived
 		}
 		old.RefKind, old.RefID = kind, id
-		return commit(old)
+		return commitSpanned(old)
 	}
-	if e = m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap, exceptUpload); e != nil {
+	capCtx, endCap := telemetry.Span(ctx, "attachment.db_capacity")
+	e = m.Store.CheckAttachmentCapacity(capCtx, size, m.Config.StorageCap, m.Config.PutCap, exceptUpload)
+	endCap(size, e != nil)
+	if e != nil {
 		return store.Attachment{}, false, e
 	}
-	if alwaysWrite {
-		if e = write(ctx); e != nil {
-			return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrObjectStore, e)
-		}
-	} else if e = m.Objects.Stat(ctx, key(sha)); e != nil {
-		if e = write(ctx); e != nil {
-			return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrObjectStore, e)
-		}
+	// The object step is the Stat (unless alwaysWrite) and, when it is needed,
+	// the write. A Stat error means the object is absent and is written.
+	objCtx, endObject := telemetry.Span(ctx, "attachment.object_put")
+	if alwaysWrite || m.Objects.Stat(objCtx, key(sha)) != nil {
+		e = write(objCtx)
+	} else {
+		e = nil
+	}
+	endObject(size, e != nil)
+	if e != nil {
+		return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrObjectStore, e)
 	}
 	x := store.Attachment{SHA256: sha, SizeBytes: size, MIME: mime, OriginalName: name, CreatedBy: client, RefKind: kind, RefID: id, ObjectLocation: ObjectLocation(m.Config)}
-	return commit(x)
+	return commitSpanned(x)
 }
 func (m *Manager) Get(ctx context.Context, sha string) (store.Attachment, io.ReadCloser, error) {
 	if !m.Enabled {

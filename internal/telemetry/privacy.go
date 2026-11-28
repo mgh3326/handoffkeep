@@ -3,6 +3,7 @@ package telemetry
 import (
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/getsentry/sentry-go"
 )
@@ -64,6 +65,11 @@ func scrubEvent(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 	}
 	for _, span := range event.Spans {
 		span.Tags = nil
+		if strings.HasPrefix(span.Op, "attachment.") {
+			// Internal spans keep only their fixed name and the byte count.
+			span.Data = onlyKeys(span.Data, SizeAttribute)
+			continue
+		}
 		if span.Op != "db.sql.query" {
 			span.Description, span.Data = "", nil
 			continue
