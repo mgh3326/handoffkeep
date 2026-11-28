@@ -25,6 +25,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/telemetry"
 	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
@@ -2438,7 +2439,9 @@ func (s Server) attachmentPut(w http.ResponseWriter, r *http.Request) {
 	// This buffered route has a 64 MiB server-memory budget; larger OCI-sized
 	// files use the direct begin/complete upload endpoints.
 	max := min(s.Service.Attachments.Config.MaxBytes, int64(64<<20))
+	_, endBody := telemetry.Span(r.Context(), "attachment.body_receive")
 	b, e := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
+	endBody(int64(len(b)), e != nil)
 	if e != nil {
 		appErr(w, r, attachments.ErrTooLarge)
 		return
